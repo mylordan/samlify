@@ -30,25 +30,18 @@ export default class Metadata implements MetadataInterface {
   * @param  {string | Buffer} metadata xml
   * @param  {object} extraParse for custom metadata extractor
   */
-  constructor(xml: string | Buffer, extraParse) {
+  constructor(xml: string | Buffer, extraParse = []) {
     this.xmlString = xml.toString();
 
-    this.meta = libsaml.extractor(this.xmlString, Array.prototype.concat([{
-      localName: 'EntityDescriptor',
-      attributes: ['entityID'],
+    this.meta = libsaml.extractor(this.xmlString, extraParse.concat(['NameIDFormat', {
+      localName: 'EntityDescriptor', attributes: ['entityID'],
     }, {
-      localName: {
-        tag: 'KeyDescriptor',
-        key: 'use',
-      },
+      localName: { tag: 'KeyDescriptor', key: 'use' },
       valueTag: 'X509Certificate',
     }, {
-      localName: {
-        tag: 'SingleLogoutService',
-        key: 'Binding',
-      },
+      localName: { tag: 'SingleLogoutService', key: 'Binding' },
       attributeTag: 'Location',
-    }, 'NameIDFormat'], extraParse || []));
+    }]));
 
     if (!this.meta.entitydescriptor || Array.isArray(this.meta.entitydescriptor)) {
       throw new Error('metadata must contain exactly one entity descriptor');
@@ -95,7 +88,7 @@ export default class Metadata implements MetadataInterface {
   * @desc Get the support NameID format declared in entity metadata
   * @return {array} support NameID format
   */
-  public getNameIDFormat(): any[] {
+  public getNameIDFormat(): any {
     return this.meta.nameidformat;
   }
 

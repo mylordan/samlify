@@ -63,7 +63,7 @@ function buildRedirectURL(opts: BuildRedirectConfig) {
   }
   if (isSigned) {
     const sigAlg = pvPair(urlParams.sigAlg, encodeURIComponent(entitySetting.requestSignatureAlgorithm));
-    const octetString = samlRequest + sigAlg + relayState;
+    const octetString = samlRequest + relayState + sigAlg;
     return baseUrl + pvPair(queryParam, octetString, noParams) + pvPair(urlParams.signature, encodeURIComponent(libsaml.constructMessageSignature(queryParam + '=' + octetString, entitySetting.privateKey, entitySetting.privateKeyPass, null, entitySetting.requestSignatureAlgorithm)));
   }
   return baseUrl + pvPair(queryParam, samlRequest + relayState, noParams);
@@ -95,7 +95,7 @@ function loginRequestRedirectURL(entity: { idp: Idp, sp: Sp }, customTagReplacem
         Issuer: metadata.sp.getEntityID(),
         IssueInstant: new Date().toISOString(),
         NameIDFormat: namespace.format[spSetting.loginNameIDFormat] || namespace.format.emailAddress,
-        AssertionConsumerServiceURL: metadata.sp.getAssertionConsumerService(binding.redirect),
+        AssertionConsumerServiceURL: metadata.sp.getAssertionConsumerService(binding.post),
         EntityID: metadata.sp.getEntityID(),
         AllowCreate: spSetting.allowCreate,
       } as any);
@@ -108,6 +108,7 @@ function loginRequestRedirectURL(entity: { idp: Idp, sp: Sp }, customTagReplacem
         isSigned: metadata.sp.isAuthnRequestSigned(),
         entitySetting: spSetting,
         baseUrl: base,
+        relayState: spSetting.relayState,
       }),
     };
   }

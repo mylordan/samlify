@@ -11,7 +11,7 @@ import { tags, algorithms, wording } from './urn';
 import xpath, { select } from 'xpath';
 import * as camel from 'camelcase';
 import { MetadataInterface } from './metadata';
-import { isString, isObject, isUndefined } from 'lodash';
+import { isString, isObject, isUndefined, includes } from 'lodash';
 import * as nrsa from 'node-rsa';
 import crpyto, { SignedXml, FileKeyInfo } from 'xml-crypto';
 import * as xmlenc from 'xml-encryption';
@@ -36,13 +36,13 @@ export interface SignatureConstructor {
   isMessageSigned?: boolean;
 }
 
-interface SignatureVerifierOptions {
+export interface SignatureVerifierOptions {
   cert?: MetadataInterface;
   signatureAlgorithm?: string;
   keyFile?: string;
 }
 
-interface ExtractorResult {
+export interface ExtractorResult {
   [key: string]: any;
   signature?: string | string[];
   issuer?: string | string[];
@@ -50,7 +50,7 @@ interface ExtractorResult {
   notexist?: boolean;
 }
 
-interface LoginResponseAttribute {
+export interface LoginResponseAttribute {
   name: string;
   nameFormat: string; //
   valueXsiType: string; //
@@ -251,9 +251,17 @@ const libSaml = () => {
           value.forEach(v => dat.push(String(v.nodeValue)));
           res = dat;
         }
-        obj[key[0].nodeValue.toString()] = res;
+
+        const objKey = key[0].nodeValue.toString();
+
+        if (obj[objKey]) {
+          obj[objKey] = [obj[objKey]].concat(res);
+        } else {
+          obj[objKey] = res;
+        }
+
       } else {
-        //console.warn('Multiple keys or null value is found');
+        // console.warn('Multiple keys or null value is found');
       }
     });
     return Object.keys(obj).length === 0 ? undefined : obj;
@@ -444,46 +452,42 @@ const libSaml = () => {
     * @return {boolean} verification result
     */
     verifySignature(xml: string, opts: SignatureVerifierOptions) {
-
-      try {
-        const doc = new dom().parseFromString(xml);
-        const selection = select("//*[local-name(.)='Signature']", doc);
-        const sig = new SignedXml();
+      const doc = new dom().parseFromString(xml);
+      const selection = select("//*[local-name(.)='Signature']", doc);
+      // guarantee to have a signature in saml response
+      if (selection.length === 0) {
+        throw new Error('no signature is found in the context');
+      }
+      const sig = new SignedXml();
+      let res = true;
+      xml = xml.replace(/<ds:Signature(.*?)>(.*?)<\/(.*?)ds:Signature>/g, '');
+      selection.forEach(s => {
+        let selectedCert = '';
         sig.signatureAlgorithm = opts.signatureAlgorithm;
         if (opts.keyFile) {
           sig.keyInfoProvider = new FileKeyInfo(opts.keyFile);
         } else if (opts.cert) {
-          sig.keyInfoProvider = new this.getKeyInfo(opts.cert.getX509Certificate(certUse.signing));
+          let metadataCert: any = opts.cert.getX509Certificate(certUse.signing);
+          if (typeof metadataCert === 'string') {
+            metadataCert = [metadataCert];
+          }
+          metadataCert = metadataCert.map(utility.normalizeCerString);
+          let x509Certificate = select(".//*[local-name(.)='X509Certificate']", s)[0].firstChild.data;
+          x509Certificate = utility.normalizeCerString(x509Certificate);
+          if (includes(metadataCert, x509Certificate)) {
+            selectedCert = x509Certificate;
+          }
+          if (selectedCert === '') {
+            throw new Error('certificate in document is not matched those specified in metadata');
+          }
+          sig.keyInfoProvider = new this.getKeyInfo(selectedCert);
         } else {
-          throw new Error('Undefined certificate in \'opts\' object');
+          throw new Error('undefined certificate in \'opts\' object');
         }
-        let res = true;
-        xml = xml.replace(/<ds:Signature(.*?)>(.*?)<\/(.*?)ds:Signature>/g, '');
-        selection.forEach(s => {
-          const signature = new dom().parseFromString(s.toString());
-          sig.loadSignature(signature);
-          res = res && sig.checkSignature(xml);
-        });
-        return res;
-      } catch (e) {
-        throw new Error(e);
-      }
-      /*
-      const sig = new SignedXml();
-      sig.signatureAlgorithm = signatureAlgorithm;
-      // Add assertion sections as reference
-      if (opts.keyFile) {
-        sig.keyInfoProvider = new FileKeyInfo(opts.keyFile);
-      } else if (opts.cert) {
-        sig.keyInfoProvider = new this.getKeyInfo(opts.cert.getX509Certificate(certUse.signing));
-      } else {
-        throw new Error('Undefined certificate in \'opts\' object');
-      }
-      sig.loadSignature(node);
-      if (sig.checkSignature(purexml)) {
-        return true;
-      }
-      */
+        sig.loadSignature(s);
+        res = res && sig.checkSignature(xml);
+      });
+      return res;
     },
     /**
     * @desc High-level XML extractor
@@ -600,28 +604,29 @@ const libSaml = () => {
     * @desc Encrypt the assertion section in Response
     * @param  {Entity} sourceEntity             source entity
     * @param  {Entity} targetEntity             target entity
-    * @param {string} entireXML                 response in xml string format
+    * @param  {string} xml                      response in xml string format
     * @return {Promise} a promise to resolve the finalized xml
     */
-    encryptAssertion(sourceEntity, targetEntity, entireXML: string) {
+    encryptAssertion(sourceEntity, targetEntity, xml: string) {
       // Implement encryption after signature if it has
       return new Promise<string>((resolve, reject) => {
-        if (entireXML) {
+        if (xml) {
           const sourceEntitySetting = sourceEntity.entitySetting;
           const targetEntitySetting = targetEntity.entitySetting;
           const sourceEntityMetadata = sourceEntity.entityMeta;
           const targetEntityMetadata = targetEntity.entityMeta;
-          const assertionNode = getEntireBody(new dom().parseFromString(entireXML), 'Assertion');
-          const assertion = !isUndefined(assertionNode) ? utility.parseString(assertionNode.toString()) : '';
-
-          if (assertion === '') {
-            return reject(new Error('undefined assertion or invalid syntax'));
+          const doc = new dom().parseFromString(xml);
+          const assertions = select("//*[local-name(.)='Assertion']", doc);
+          const assertionNode = getEntireBody(new dom().parseFromString(xml), 'Assertion');
+          if (!Array.isArray(assertions)) {
+            throw new Error('undefined assertion is found');
           }
-
+          if (assertions.length !== 1) {
+            throw new Error(`undefined number (${assertions.length}) of assertion section`);
+          }
           // Perform encryption depends on the setting, default is false
           if (sourceEntitySetting.isAssertionEncrypted) {
-
-            xmlenc.encrypt(assertion, {
+            xmlenc.encrypt(assertions[0].toString(), {
               // use xml-encryption module
               rsa_pub: new Buffer(utility.getPublicKeyPemFromCertificate(targetEntityMetadata.getX509Certificate(certUse.encrypt)).replace(/\r?\n|\r/g, '')), // public key from certificate
               pem: new Buffer('-----BEGIN CERTIFICATE-----' + targetEntityMetadata.getX509Certificate(certUse.encrypt) + '-----END CERTIFICATE-----'),
@@ -634,10 +639,13 @@ const libSaml = () => {
               if (!res) {
                 return reject(new Error('undefined encrypted assertion'));
               }
-              return resolve(utility.base64Encode(entireXML.replace(/<saml:Assertion(.*?)>(.*?)<\/(.*?)Assertion>/g, `<saml:EncryptedAssertion>${res}</saml:EncryptedAssertion>`)));
+              const { encryptedAssertion: encAssertionPrefix } = sourceEntitySetting.tagPrefix;
+              const encryptAssertionNode = new dom().parseFromString(`<${encAssertionPrefix}:EncryptedAssertion>${res}</${encAssertionPrefix}:EncryptedAssertion>`);
+              doc.replaceChild(encryptAssertionNode, assertions[0]);
+              return resolve(utility.base64Encode(doc.toString()));
             });
           } else {
-            return resolve(utility.base64Encode(entireXML)); // No need to do encrpytion
+            return resolve(utility.base64Encode(xml)); // No need to do encrpytion
           }
         } else {
           return reject(new Error('empty or undefined xml string during encryption'));
@@ -660,13 +668,15 @@ const libSaml = () => {
         }
         // Perform encryption depends on the setting of where the message is sent, default is false
         const hereSetting = here.entitySetting;
-        const parseEntireXML = new dom().parseFromString(String(entireXML));
-        const encryptedAssertionNode = getEntireBody(parseEntireXML, 'EncryptedAssertion');
-        const encryptedAssertion = !isUndefined(encryptedAssertionNode) ? utility.parseString(String(encryptedAssertionNode)) : '';
-        if (encryptedAssertion === '') {
-          return reject(new Error('undefined assertion or invalid syntax'));
+        const xml = new dom().parseFromString(entireXML);
+        const encryptedAssertions = select("//*[local-name(.)='EncryptedAssertion']", xml);
+        if (!Array.isArray(encryptedAssertions)) {
+          throw new Error('undefined encrypted assertion is found');
         }
-        return xmlenc.decrypt(encryptedAssertion, {
+        if (encryptedAssertions.length !== 1) {
+          throw new Error(`undefined number (${encryptedAssertions.length}) of encrypted assertions section`);
+        }
+        return xmlenc.decrypt(encryptedAssertions[0].toString(), {
           key: utility.readPrivateKey(hereSetting.encPrivateKey, hereSetting.encPrivateKeyPass),
         }, (err, res) => {
           if (err) {
@@ -675,7 +685,9 @@ const libSaml = () => {
           if (!res) {
             return reject(new Error('undefined encrypted assertion'));
           }
-          return resolve(String(parseEntireXML).replace(/\r?\n/g, '').replace(/<saml:EncryptedAssertion(.*?)>(.*?)<\/(.*?)EncryptedAssertion>/g, res));
+          const assertionNode = new dom().parseFromString(res);
+          xml.replaceChild(assertionNode, encryptedAssertions[0]);
+          return resolve(xml.toString());
         });
       });
     },

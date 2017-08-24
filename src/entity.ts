@@ -4,25 +4,28 @@
 * @desc  An abstraction for identity provider and service provider.
 */
 import { base64Decode, isNonEmptyArray, inflateString } from './utility';
-import { namespace, wording, algorithms } from './urn';
+import { namespace, wording, algorithms, messageConfigurations } from './urn';
 import * as uuid from 'uuid';
 import libsaml from './libsaml';
 import Metadata from './metadata';
-import IdpMetadata from './metadata-idp';
-import SpMetadata from './metadata-sp';
+import IdpMetadata, { IdpMetadata as IdpMetadataConstructor } from './metadata-idp';
+import SpMetadata, { SpMetadata as SpMetadataConstructor } from './metadata-sp';
 import redirectBinding from './binding-redirect';
 import postBinding from './binding-post';
 import { isString, isUndefined, isArray, get } from 'lodash';
 import * as url from 'url';
+import { MetadataIdpConstructor, MetadataSpConstructor, EntitySetting } from './types';
 
 const dataEncryptionAlgorithm = algorithms.encryption.data;
 const keyEncryptionAlgorithm = algorithms.encryption.key;
 const bindDict = wording.binding;
 const signatureAlgorithms = algorithms.signature;
+const messageSigningOrders = messageConfigurations.signingOrder;
 const nsBinding = namespace.binding;
 
 const defaultEntitySetting = {
   wantLogoutResponseSigned: false,
+  messageSigningOrder: messageSigningOrders.SIGN_THEN_ENCRYPT,
   wantLogoutRequestSigned: false,
   allowCreate: false,
   isAssertionEncrypted: false,
@@ -44,13 +47,8 @@ export interface BindingContext {
   id: string;
 }
 
-export interface PostRequestInfo extends BindingContext {
-  relayState: string;
-  type: string;
-  entityEndpoint: string;
-}
-
-export interface PostResponseInfo extends BindingContext {
+export interface PostBindingContext extends BindingContext {
+  relayState?: string;
   entityEndpoint: string;
   type: string;
 }
@@ -61,20 +59,21 @@ export interface ParseResult {
   sigAlg?: string;
 }
 
-export default class Entity {
+export type EntityConstructor = (MetadataIdpConstructor | MetadataSpConstructor)
+  & { metadata?: string | Buffer };
 
-  entitySetting: any;
+export default class Entity {
+  entitySetting: EntitySetting;
   entityType: string;
-  entityMeta: any;
+  entityMeta: IdpMetadataConstructor | SpMetadataConstructor;
+
   /**
-  * @desc  Constructor
-  * @param {object} entitySetting
-  * @param {object} entityMetaClass determine whether the entity is IdentityProvider or ServiceProvider
-  * @param {string} entityMeta is the entity metadata, deprecated after 2.0
+  * @param entitySetting
+  * @param entityMeta is the entity metadata, deprecated after 2.0
   */
-  constructor(entitySetting, entityType) {
+  constructor(entitySetting: EntityConstructor, entityType: 'idp' | 'sp') {
     this.entitySetting = Object.assign({}, defaultEntitySetting, entitySetting);
-    const metadata = entitySetting.metadata ? entitySetting.metadata : entitySetting;
+    const metadata = entitySetting.metadata || entitySetting;
     switch (entityType) {
       case 'idp':
         this.entityMeta = IdpMetadata(metadata);
@@ -233,6 +232,17 @@ export default class Entity {
       const encodedRequest = body[libsaml.getQueryParamByType(parserType)];
       let res = String(base64Decode(encodedRequest));
       const issuer = targetEntityMetadata.getEntityID();
+      //verify signature before decryption if IDP encrypted then signed the message
+      if (checkSignature && from.entitySetting.messageSigningOrder === messageSigningOrders.ENCRYPT_THEN_SIGN) {
+
+        // verify the signatures (for both assertion/message)
+        if (!libsaml.verifySignature(res, {
+          cert: opts.from.entityMeta,
+          signatureAlgorithm: opts.from.entitySetting.requestSignatureAlgorithm,
+        })) {
+          throw new Error('incorrect signature');
+        }
+      }
       if (parserType === 'SAMLResponse' && from.entitySetting.isAssertionEncrypted) {
         res = await libsaml.decryptAssertion(here, res);
       }
@@ -240,7 +250,7 @@ export default class Entity {
         samlContent: res,
         extract: libsaml.extractor(res, fields),
       };
-      if (checkSignature) {
+      if (checkSignature && from.entitySetting.messageSigningOrder === messageSigningOrders.SIGN_THEN_ENCRYPT) {
         // verify the signatures (for both assertion/message)
         if (!libsaml.verifySignature(res, {
           cert: opts.from.entityMeta,
@@ -265,7 +275,7 @@ export default class Entity {
   * @param  {string} relayState      the URL to which to redirect the user when logout is complete
   * @param  {function} customTagReplacement     used when developers have their own login response template
   */
-  createLogoutRequest(targetEntity, binding, user, relayState = '', customTagReplacement?): BindingContext | PostRequestInfo {
+  createLogoutRequest(targetEntity, binding, user, relayState = '', customTagReplacement?): BindingContext | PostBindingContext {
     if (binding === wording.binding.redirect) {
       return redirectBinding.logoutRequestRedirectURL(user, {
         init: this,
@@ -294,7 +304,7 @@ export default class Entity {
   * @param  {string} binding                     protocol binding
   * @param  {function} customTagReplacement                 used when developers have their own login response template
   */
-  createLogoutResponse(target, requestInfo, binding, relayState = '', customTagReplacement?): BindingContext {
+  createLogoutResponse(target, requestInfo, binding, relayState = '', customTagReplacement?): BindingContext | PostBindingContext {
     const protocol = namespace.binding[binding];
     if (protocol === namespace.binding.redirect) {
       return redirectBinding.logoutResponseRedirectURL(requestInfo, {
